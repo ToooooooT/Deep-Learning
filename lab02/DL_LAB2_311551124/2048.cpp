@@ -8,7 +8,7 @@
  *
  * References:
  * [1] Szubert, Marcin, and Wojciech Jaśkowski. "Temporal difference learning of n-tuple networks for the game 2048."
- * Computational Intelligence and Games (CIG), 2014 IEEE Conference on. IEEE, 2014.
+max_mean_score* Computational Intelligence and Games (CIG), 2014 IEEE Conference on. IEEE, 2014.
  * [2] Wu, I-Chen, et al. "Multi-stage temporal difference learning for 2048."
  * Technologies and Applications of Artificial Intelligence. Springer International Publishing, 2014. 366-378.
  * [3] Oka, Kazuto, and Kiminori Matsuzaki. "Systematic selection of n-tuple networks for 2048."
@@ -288,6 +288,8 @@ public:
 	void rotate_left() { transpose(); flip(); } // counterclockwise
 	void reverse() { mirror(); flip(); }
 
+	
+
 public:
 
     friend std::ostream& operator <<(std::ostream& out, const board& b) {
@@ -308,6 +310,14 @@ public:
 private:
 	uint64_t raw;
 };
+
+void show(board b) {
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j)
+			printf("%2d\t", b.at(i * 4 + j));
+		printf("\n");
+	}
+}
 
 /**
  * feature and weight table for temporal difference learning
@@ -393,7 +403,13 @@ protected:
 		try {
 			total += num;
 			if (total > limit) throw std::bad_alloc();
-			return new float[num]();
+			// return new float[num]();
+			// OTD
+			float *w = new float[num]();
+			float init_weights = 5000;
+			for (int i = 0; i < num; ++i)
+				w[i] = init_weights;
+			return w;
 		} catch (std::bad_alloc&) {
 			error << "memory limit exceeded" << std::endl;
 			std::exit(-1);
@@ -464,7 +480,12 @@ public:
 	 */
 	virtual float estimate(const board& b) const {
 		// TODO
-
+		float value = 0;
+		for (int i = 0; i < iso_last; ++i) {
+			size_t index = indexof(isomorphic[i], b);
+			value += weight[index];
+		}
+		return value;
 	}
 
 	/**
@@ -472,7 +493,11 @@ public:
 	 */
 	virtual float update(const board& b, float u) {
 		// TODO
-
+		for (int i = 0; i < iso_last; ++i) {
+			size_t index = indexof(isomorphic[i], b);
+			weight[index] += u;
+		}
+		return -1; // no use value
 	}
 
 	/**
@@ -509,7 +534,11 @@ public:
 protected:
 
 	size_t indexof(const std::vector<int>& patt, const board& b) const {
-		// TODO
+		// return index of this pattern in the current board
+		size_t index = 0;
+		for (int i = 0; i < patt.size(); ++i)
+			index = (index << 4) + b.at(patt[i]);
+		return index;
 	}
 
 	std::string nameof(const std::vector<int>& patt) const {
@@ -617,6 +646,8 @@ public:
 	learning() {}
 	~learning() {}
 
+	float mean() const { return max_mean_score; }
+	void set_mean(float value) { max_mean_score = value; }
 	/**
 	 * add a feature into tuple networks
 	 *
@@ -678,10 +709,25 @@ public:
 	state select_best_move(const board& b) const {
 		state after[4] = { 0, 1, 2, 3 }; // up, right, down, left
 		state* best = after;
+		bool done = true;
 		for (state* move = after; move != after + 4; move++) {
 			if (move->assign(b)) {
 				// TODO
-
+				done = false;
+				int cnt = 0; // count how many empty tile 
+				float sum = 0; // sum all possible next_state value
+				for (int i = 0; i < 16; ++i) {
+					board after_state = move->after_state();
+					if (after_state.at(i) == 0) {
+						cnt += 1;
+						after_state.set(i, 1);
+						sum += 0.9 * estimate(after_state);
+						after_state.set(i, 2);
+						sum += 0.1 * estimate(after_state);
+					}
+				}
+				sum /= cnt;
+				move->set_value(move->value() + sum);
 				if (move->value() > best->value())
 					best = move;
 			} else {
@@ -689,7 +735,13 @@ public:
 			}
 			debug << "test " << *move;
 		}
-		return *best;
+		if (done) {
+			state term[] = {0};
+			term[0].assign(b);
+			return term[0];
+		}
+		else
+			return *best;
 	}
 
 	/**
@@ -706,9 +758,49 @@ public:
 	 *  { (s0,s0',a0,r0), (s1,s1',a1,r1), (s2,s2,x,-1) }
 	 *  where (x,x,x,x) means (before state, after state, action, reward)
 	 */
-	void update_episode(std::vector<state>& path, float alpha = 0.1) const {
-		// TODO
+	void update_episode(std::vector<state>& path, int episode_cnt, double alpha = 0.1) const {
+		// TODO: Use TD-lambda (5)
+		float lambdas[] = {0, 0.5, 0.25, 0.125, 0.0625, 0.03125};
 
+		int n = path.size() - 1; // last state index
+		// train five last state
+		for (int i = n; i >= n - 4; --i) {
+			// the last step
+			float coef = lambdas[n + 1 - i];
+			float normalization = coef; // normalization factor
+			float sum = 0; // total td-target
+
+			// the remain step
+			for (int j = i + 1; j <= n; ++j) { // j: next state index
+				float td_target = estimate(path[j].before_state());
+				coef = lambdas[j - i];
+				normalization += coef;
+				for (int k = i; k < j; ++k) // k: reward index
+					td_target += path[k].reward();
+				sum += coef * td_target;
+			}
+			update(path[i].before_state(), (sum / normalization - estimate(path[i].before_state())) * alpha);
+		}
+
+		// train remain state
+		for (int i = n - 5; i >= 0; --i) {
+			// the 1~4 step
+			float sum = 0; // total td-target
+			for (int j = i + 1; j <= i + 4; ++j) { // j: next state index
+				float td_target = estimate(path[j].before_state());
+				for (int k = i; k < j; ++k) // k: reward index
+					td_target += path[k].reward();
+				sum += lambdas[j - i] * td_target;
+			}
+
+			// the fifth step
+			float td_target = estimate(path[i + 5].before_state());
+			for (int k = i; k < i + 5; ++k) // k: reward index
+				td_target += path[k].reward();
+			sum += lambdas[4] * td_target;
+
+			update(path[i].before_state(), (sum - estimate(path[i].before_state())) * alpha);
+		}
 	}
 
 	/**
@@ -730,7 +822,7 @@ public:
 	 *  '93.7%': 93.7% (937 games) reached 8192-tiles in last 1000 games (a.k.a. win rate of 8192-tile)
 	 *  '22.4%': 22.4% (224 games) terminated with 8192-tiles (the largest) in last 1000 games
 	 */
-	void make_statistic(size_t n, const board& b, int score, int unit = 1000) {
+	float make_statistic(size_t n, const board& b, int score, int unit = 1000) {
 		scores.push_back(score);
 		maxtile.push_back(0);
 		for (int i = 0; i < 16; i++) {
@@ -762,7 +854,9 @@ public:
 			}
 			scores.clear();
 			maxtile.clear();
+			return mean;
 		}
+		return -1;
 	}
 
 	/**
@@ -816,19 +910,23 @@ public:
 		}
 	}
 
+	int max_score = 0;
+
 private:
 	std::vector<feature*> feats;
 	std::vector<int> scores;
 	std::vector<int> maxtile;
+	float max_mean_score;
 };
 
 int main(int argc, const char* argv[]) {
 	info << "TDL2048-Demo" << std::endl;
 	learning tdl;
+	FILE *fp = fopen("8x6tuple_OTDlambda_init5000.txt", "a");
 
 	// set the learning parameters
-	float alpha = 0.1;
-	size_t total = 100000;
+	double alpha = 0.1 / 8;
+	size_t total = 100000000;
 	unsigned seed;
 	__asm__ __volatile__ ("rdtsc" : "=a" (seed));
 	info << "alpha = " << alpha << std::endl;
@@ -837,18 +935,25 @@ int main(int argc, const char* argv[]) {
 	std::srand(seed);
 
 	// initialize the features
-	tdl.add_feature(new pattern({ 0, 1, 2, 3, 4, 5 }));
-	tdl.add_feature(new pattern({ 4, 5, 6, 7, 8, 9 }));
 	tdl.add_feature(new pattern({ 0, 1, 2, 4, 5, 6 }));
-	tdl.add_feature(new pattern({ 4, 5, 6, 8, 9, 10 }));
+	tdl.add_feature(new pattern({ 1, 2, 5, 6, 9, 13 }));
+	tdl.add_feature(new pattern({ 0, 1, 2, 3, 4, 5 }));
+	tdl.add_feature(new pattern({ 0, 1, 5, 6, 7, 10 }));
+	tdl.add_feature(new pattern({ 0, 1, 2, 5, 9, 10 }));
+	tdl.add_feature(new pattern({ 0, 1, 5, 9, 13, 14 }));
+	tdl.add_feature(new pattern({ 0, 1, 5, 8, 9, 13 }));
+	tdl.add_feature(new pattern({ 0, 1, 2, 4, 6, 10 }));
 
 	// restore the model from file
-	tdl.load("");
+	tdl.load("./weights_8x6tuple_OTDlambda_init5000.bin");
+	// tdl.load("");
+	tdl.set_mean(0);
 
 	// train the model
 	std::vector<state> path;
 	path.reserve(20000);
-	for (size_t n = 1; n <= total; n++) {
+	int period = 100000; // if mean score don't improve in this period then decrease learning rate 
+	for (size_t n = 1, max_mean_time = 0; n <= total; n++) {
 		board b;
 		int score = 0;
 
@@ -872,13 +977,31 @@ int main(int argc, const char* argv[]) {
 		debug << "end episode" << std::endl;
 
 		// update by TD(0)
-		tdl.update_episode(path, alpha);
-		tdl.make_statistic(n, b, score);
+		tdl.update_episode(path, n, alpha);
+		float mean = tdl.make_statistic(n, b, score);
+		if (mean > 0) {
+			fprintf(fp, "%f\n", mean);
+			fflush(fp);
+		}
 		path.clear();
+
+		// learning rate decay
+		if (mean > tdl.mean()) {
+			tdl.set_mean(mean);
+			max_mean_time = n;
+		} else if (n - max_mean_time > period) {
+			alpha /= 10;
+			max_mean_time = n;
+		}
+
+		// store the model into file
+		if (n % 100000 == 0) {
+			tdl.save("weights_8x6tuple_OTDlambda_init5000.bin");
+			printf("--- learning rate: %.16lf ---\n", alpha);
+		}
 	}
 
-	// store the model into file
-	tdl.save("");
+	fclose(fp);
 
 	return 0;
 }
